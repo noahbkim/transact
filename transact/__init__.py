@@ -1,51 +1,55 @@
-from typing import Any, Dict, Callable, List, Optional
-from dataclasses import dataclass
+import abc
+from typing import Any, Callable, List, Optional
 
-Step = Callable[[Any], Any]
-StepList = List[Optional[Step]]
+StepFunctor = Callable[[Any], Any]
+StepFunctorList = List[Optional[StepFunctor]]
 
 
-@dataclass(eq=False)
-class Steps:
-    """Registrar and executor."""
+class Step(abc.ABC):
+    """Requires do and undo."""
 
-    _steps: StepList
-    _opposite_steps: StepList
-    _index: Dict[str, int]
-    _reverse: bool
+    @staticmethod
+    def do(state: Any) -> bool:
+        """Execute the step."""
 
-    def register(self, name: str) -> Callable[[Step], Step]:
-        """Register a step."""
+    @staticmethod
+    def undo(state: Any) -> bool:
+        """Undo the step assuming it's been done."""
 
-        def register(step: Step):
-            index = self._index.get(name)
-            if index is None:
-                self._index[name] = len(self._steps)
-                self._steps.append(step)
-                self._opposite_steps.append(None)
-            else:
-                self._steps[index] = step
-            return step
 
-        return register
+class Setup(abc.ABC):
+    """Setup step."""
 
-    def __call__(self, state: Any) -> bool:
-        """Execute with step lists."""
+    @staticmethod
+    def setup(state: Any) -> bool:
+        """Always run prior to execution for both direction."""
 
-        _steps = self._steps
-        _opposite_steps = self._opposite_steps
-        if self._reverse:
-            _steps = _steps[::-1]
-            _opposite_steps = _opposite_steps[::-1]
 
-        for i, do in enumerate(_steps):
+class Transaction:
+    """Core transaction methods."""
+
+    @classmethod
+    def _execute(
+            cls,
+            setup_steps: StepFunctorList,
+            do_steps: StepFunctorList,
+            undo_steps: StepFunctorList,
+            state: Any) -> bool:
+        """Run the transaction."""
+
+        for setup in setup_steps:
+            result = setup(state)
+            if not result:
+                return False
+
+        for i, do in enumerate(do_steps):
             if do is None:
                 continue
             result = do(state)
 
             # Rollback and return
             if not result:
-                for undo in reversed(_opposite_steps[:i]):
+                for undo in reversed(undo_steps[:i]):
                     if undo is None:
                         continue
                     result = undo(state)
@@ -55,18 +59,56 @@ class Steps:
 
         return True
 
+    @classmethod
+    def _steps(cls) -> List[Step]:
+        """Relies on dictionary ordering."""
 
-class Transaction:
-    """Core transaction methods."""
+        for value in cls.__dict__.values():
+            if isinstance(value, type) and issubclass(value, Step):
+                yield value
 
-    do: Steps
-    undo: Steps
+    @classmethod
+    def _setups(cls) -> List[Setup]:
+        """Relies on dictionary ordering."""
+
+        for value in cls.__dict__.values():
+            if isinstance(value, type) and issubclass(value, Setup):
+                yield value
+
+    @classmethod
+    def do(cls, state: Any) -> bool:
+        """Execute forward."""
+
+        _steps = list(cls._steps())
+        setup_steps = [s.setup for s in cls._setups()]
+        do_steps = [s.do for s in _steps]
+        undo_steps = [s.undo for s in _steps]
+        return cls._execute(setup_steps, do_steps, undo_steps, state)
+
+    @classmethod
+    def undo(cls, state: Any) -> bool:
+        """Execute backward."""
+
+        _steps = list(cls._steps())
+        _steps.reverse()
+        setup_steps = [s.setup for s in cls._setups()]
+        do_steps = [s.undo for s in _steps]
+        undo_steps = [s.do for s in _steps]
+        return cls._execute(setup_steps, do_steps, undo_steps, state)
+
+
+class StateLogging:
+    """Logging mixin."""
+
+    log: List[str]
 
     def __init__(self):
-        """Setup defaults."""
+        """Initialize log."""
 
-        _do = []
-        _undo = []
-        _index = {}
-        self.do = Steps(_do, _undo, _index, _reverse=False)
-        self.undo = Steps(_undo, _do, _index, _reverse=True)
+        super().__init__()
+        self.log = []
+
+    def print(self, *args, end="\n", sep=" "):
+        """Write to the log."""
+
+        self.log.append(sep.join(args) + end)
